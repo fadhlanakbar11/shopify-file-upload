@@ -232,6 +232,6 @@ app.post("/upload", upload.single("file"), async (req, res) => {
 });
 
 // --- start server ---
-app.listen(3000, () => {
-  console.log("✅ Server jalan di http://localhost:3000");
+app.listen(3002, () => {
+  console.log("✅ Server jalan di http://localhost:3002");
 });
