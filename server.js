@@ -1,4 +1,3 @@
-// server.js
 const express = require("express");
 const multer = require("multer");
 const axios = require("axios");
@@ -13,6 +12,11 @@ const app = express();
 app.use(cors());
 app.get("/health", (_req, res) => res.send("ok"));
 app.options("/upload", cors());
+
+// --- Menambahkan rute untuk GET / ---
+app.get("/", (req, res) => {
+  res.send("Aplikasi Shopify File Upload Berjalan!");  // Pesan sederhana untuk memastikan aplikasi berjalan
+});
 
 // --- Multer: keep original filename in /uploads ---
 const storage = multer.diskStorage({
