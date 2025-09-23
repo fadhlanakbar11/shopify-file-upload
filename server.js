@@ -1,36 +1,49 @@
+// server.js — versi rapi & aman
 const express = require("express");
 const multer = require("multer");
 const axios = require("axios");
 const cors = require("cors");
 const fs = require("fs");
+const path = require("path");
 const FormData = require("form-data");
 require("dotenv").config();
 
 const app = express();
 
-// --- CORS & health ---
-app.use(cors());
-app.get("/health", (_req, res) => res.send("ok"));
-app.options("/upload", cors());
-
-// --- Menambahkan rute untuk GET / ---
-app.get("/", (req, res) => {
-  res.send("Aplikasi Shopify File Upload Berjalan!");  // Pesan sederhana untuk memastikan aplikasi berjalan
-});
-
-// --- Multer: keep original filename in /uploads ---
-const storage = multer.diskStorage({
-  destination: (req, file, cb) => cb(null, "uploads/"),
-  filename: (req, file, cb) => cb(null, file.originalname),
-});
-const upload = multer({ storage });
-
+// ====== Konfigurasi umum ======
+app.use(cors()); // longgar; boleh dibatasi origin kalau perlu
 app.use(express.static("public"));
 
-// --- helpers ---
+// Pastikan folder uploads/ ada
+fs.mkdirSync(path.join(__dirname, "uploads"), { recursive: true });
+
+// Axios default (timeout biar gak gantung)
+const ax = axios.create({ timeout: 30_000 });
+
+// ====== Multer (simpan file sementara di disk) ======
+const storage = multer.diskStorage({
+  destination: (_req, _file, cb) => cb(null, "uploads/"),
+  filename: (_req, file, cb) => {
+    // prefiks timestamp agar tidak menimpa file lama, tetap pertahankan nama asli
+    const safeName = file.originalname.replace(/[/\\?%*:|"<>]/g, "_");
+    cb(null, `${Date.now()}_${safeName}`);
+  },
+});
+const upload = multer({
+  storage,
+  limits: { fileSize: 50 * 1024 * 1024 }, // 50MB; samakan dengan Nginx client_max_body_size
+});
+
+// ====== Health & root ======
+app.get("/", (_req, res) =>
+  res.type("text/plain").send("Shopify file upload: OK")
+);
+app.get("/health", (_req, res) => res.send("ok"));
+app.options("/upload", cors()); // preflight
+
+// ====== Helper kecil ======
 const wait = (ms) => new Promise((r) => setTimeout(r, ms));
 
-// Poll Shopify until the file URL is ready
 async function pollFileUrl({ store, token, id, maxAttempts = 12, intervalMs = 1000 }) {
   const gql = `
     query fileNode($id: ID!) {
@@ -47,49 +60,46 @@ async function pollFileUrl({ store, token, id, maxAttempts = 12, intervalMs = 10
     }
   `;
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
-    const resp = await axios.post(
+    const resp = await ax.post(
       `https://${store}/admin/api/2025-01/graphql.json`,
       { query: gql, variables: { id } },
       { headers: { "X-Shopify-Access-Token": token, "Content-Type": "application/json" } }
     );
-
     const node = resp.data?.data?.node;
-    const url =
-      node?.url ||
-      node?.image?.url ||
-      node?.preview?.image?.url ||
-      null;
-
+    const url = node?.url || node?.image?.url || node?.preview?.image?.url || null;
     if (url) return url;
-
-    // small backoff to give Shopify time to process
     await wait(intervalMs);
   }
   throw new Error("Timeout: URL belum tersedia dari Shopify.");
 }
 
-// --- main upload endpoint ---
+// ====== Endpoint utama upload ======
 app.post("/upload", upload.single("file"), async (req, res) => {
+  let tempPath; // untuk cleanup
   try {
-    console.log("📂 File diterima:", req.file);
+    if (!req.file) {
+      return res.status(400).json({ success: false, error: "Tidak ada file yang diunggah (field name harus 'file')." });
+    }
+    tempPath = req.file.path;
+    console.log("📂 File diterima:", req.file.originalname, req.file.mimetype, req.file.size);
 
     const store = process.env.SHOPIFY_STORE_DOMAIN;
     const token = process.env.SHOPIFY_ADMIN_API_TOKEN;
     if (!store || !token) {
-      return res.status(500).json({ success: false, error: "SHOPIFY_STORE_DOMAIN / SHOPIFY_ADMIN_API_TOKEN belum di-set." });
+      return res.status(500).json({
+        success: false,
+        error: "SHOPIFY_STORE_DOMAIN / SHOPIFY_ADMIN_API_TOKEN belum di-set.",
+      });
     }
 
-    // Decide IMAGE vs FILE based on mimetype
-    let resourceType = "FILE";
-    let contentType = "FILE";
-    if (req.file.mimetype?.startsWith("image/")) {
-      resourceType = "IMAGE";
-      contentType = "IMAGE";
-    }
-    console.log(`🧭 resourceType=${resourceType} contentType=${contentType} mime=${req.file.mimetype}`);
+    // Tentukan tipe konten
+    const isImage = req.file.mimetype?.startsWith("image/");
+    const resourceType = isImage ? "IMAGE" : "FILE";
+    const contentType = isImage ? "IMAGE" : "FILE";
+    console.log(`🧭 resourceType=${resourceType} contentType=${contentType}`);
 
     // STEP 1: stagedUploadsCreate
-    const stagedRes = await axios.post(
+    const stagedRes = await ax.post(
       `https://${store}/admin/api/2025-01/graphql.json`,
       {
         query: `
@@ -115,44 +125,39 @@ app.post("/upload", upload.single("file"), async (req, res) => {
           ],
         },
       },
-      {
-        headers: {
-          "X-Shopify-Access-Token": token,
-          "Content-Type": "application/json",
-        },
-      }
+      { headers: { "X-Shopify-Access-Token": token, "Content-Type": "application/json" } }
     );
 
     const errors1 = stagedRes.data?.data?.stagedUploadsCreate?.userErrors || [];
     if (errors1.length) {
       console.error("❌ stagedUploadsCreate errors:", errors1);
-      return res.status(500).json({ success: false, error: "stagedUploadsCreate gagal", details: errors1 });
+      return res.status(502).json({ success: false, error: "stagedUploadsCreate gagal", details: errors1 });
     }
 
     const stagedTarget = stagedRes.data?.data?.stagedUploadsCreate?.stagedTargets?.[0];
     if (!stagedTarget) {
-      return res.status(500).json({ success: false, error: "Gagal membuat staged upload (stagedTarget kosong)." });
+      return res.status(502).json({ success: false, error: "Gagal membuat staged upload (stagedTarget kosong)." });
     }
 
-    // STEP 2: POST ke signed URL (S3/GCS)
+    // STEP 2: Upload ke storage (S3/GCS) via signed URL
     const form = new FormData();
     stagedTarget.parameters.forEach((p) => form.append(p.name, p.value));
-    form.append("file", fs.createReadStream(req.file.path));
+    form.append("file", fs.createReadStream(tempPath));
 
-    const s3Res = await axios.post(stagedTarget.url, form, {
+    const s3Res = await ax.post(stagedTarget.url, form, {
       headers: form.getHeaders(),
       maxContentLength: Infinity,
       maxBodyLength: Infinity,
-      validateStatus: () => true, // accept 201/204/2xx
+      validateStatus: () => true,
     });
-    console.log("✅ Upload ke S3:", s3Res.status);
+    console.log("✅ Upload ke storage:", s3Res.status);
 
     if (s3Res.status < 200 || s3Res.status >= 300) {
-      return res.status(500).json({ success: false, error: "Upload ke storage gagal", status: s3Res.status });
+      return res.status(502).json({ success: false, error: "Upload ke storage gagal", status: s3Res.status });
     }
 
     // STEP 3: Register file di Shopify
-    const fileCreateRes = await axios.post(
+    const fileCreateRes = await ax.post(
       `https://${store}/admin/api/2025-01/graphql.json`,
       {
         query: `
@@ -162,13 +167,8 @@ app.post("/upload", upload.single("file"), async (req, res) => {
                 __typename
                 id
                 alt
-                ... on MediaImage {
-                  image { url }
-                  preview { image { url } }
-                }
-                ... on GenericFile {
-                  url
-                }
+                ... on MediaImage { image { url } preview { image { url } } }
+                ... on GenericFile { url }
               }
               userErrors { field message }
             }
@@ -178,41 +178,30 @@ app.post("/upload", upload.single("file"), async (req, res) => {
           files: [
             {
               alt: "Uploaded via Node.js",
-              contentType: contentType,
+              contentType,
               originalSource: stagedTarget.resourceUrl,
             },
           ],
         },
       },
-      {
-        headers: {
-          "X-Shopify-Access-Token": token,
-          "Content-Type": "application/json",
-        },
-      }
+      { headers: { "X-Shopify-Access-Token": token, "Content-Type": "application/json" } }
     );
-
-    console.log("📩 Full response:", JSON.stringify(fileCreateRes.data, null, 2));
 
     const errors2 = fileCreateRes.data?.data?.fileCreate?.userErrors || [];
     if (errors2.length) {
       console.error("❌ fileCreate userErrors:", errors2);
-      return res.status(500).json({ success: false, error: "fileCreate gagal", details: errors2 });
+      return res.status(502).json({ success: false, error: "fileCreate gagal", details: errors2 });
     }
 
     const uploadedFile = fileCreateRes.data?.data?.fileCreate?.files?.[0] || null;
     if (!uploadedFile) {
-      return res.status(500).json({ success: false, error: "Tidak ada file object dari Shopify", raw: fileCreateRes.data });
+      return res.status(502).json({ success: false, error: "Tidak ada file object dari Shopify", raw: fileCreateRes.data });
     }
 
-    // Try immediate URL first
-    let fileUrl =
-      uploadedFile?.url ||
-      uploadedFile?.image?.url ||
-      uploadedFile?.preview?.image?.url ||
-      null;
+    // Ambil URL
+    let fileUrl = uploadedFile?.url || uploadedFile?.image?.url || uploadedFile?.preview?.image?.url || null;
 
-    // If image is not ready yet, poll until ready
+    // Jika belum siap, poll
     if (!fileUrl && uploadedFile.id) {
       console.log("⏳ URL belum siap, polling node(id)...");
       try {
@@ -223,8 +212,7 @@ app.post("/upload", upload.single("file"), async (req, res) => {
     }
 
     if (!fileUrl) {
-      console.error("⚠️ URL kosong:", uploadedFile);
-      return res.status(500).json({ success: false, error: "Response tidak berisi URL file", uploadedFile });
+      return res.status(502).json({ success: false, error: "Response tidak berisi URL file", uploadedFile });
     }
 
     console.log("✅ Uploaded ke Shopify:", fileUrl);
@@ -232,10 +220,15 @@ app.post("/upload", upload.single("file"), async (req, res) => {
   } catch (err) {
     console.error("❌ Error upload:", err.response?.data || err.message);
     return res.status(500).json({ success: false, error: "Gagal upload ke Shopify" });
+  } finally {
+    // Hapus file lokal jika ada
+    if (tempPath) {
+      fs.promises.unlink(tempPath).catch(() => {});
+    }
   }
 });
 
-// --- start server ---
-app.listen(3002, () => {
-  console.log("✅ Server jalan di http://localhost:3002");
-});
+// ====== Start server (paling akhir) ======
+const PORT = process.env.PORT || 3002;
+const HOST = "127.0.0.1";
+app.listen(PORT, HOST, () => console.log(`✅ http://${HOST}:${PORT}`));
