@@ -1,4 +1,3 @@
-// server.js — versi rapi & aman
 const express = require("express");
 const multer = require("multer");
 const axios = require("axios");
@@ -29,6 +28,7 @@ const storage = multer.diskStorage({
     cb(null, `${Date.now()}_${safeName}`);
   },
 });
+
 const upload = multer({
   storage,
   limits: { fileSize: 50 * 1024 * 1024 }, // 50MB; samakan dengan Nginx client_max_body_size
@@ -74,14 +74,18 @@ async function pollFileUrl({ store, token, id, maxAttempts = 12, intervalMs = 10
 }
 
 // ====== Endpoint utama upload ======
-app.post("/upload", upload.single("file"), async (req, res) => {
+app.post("/upload", upload.fields([
+  { name: 'passport-photo', maxCount: 1 },
+  { name: 'cover-photo', maxCount: 1 },
+  { name: 'endorsement-photo', maxCount: 1 }
+]), async (req, res) => {
   let tempPath; // untuk cleanup
   try {
-    if (!req.file) {
-      return res.status(400).json({ success: false, error: "Tidak ada file yang diunggah (field name harus 'file')." });
+    if (!req.files) {
+      return res.status(400).json({ success: false, error: "Tidak ada file yang diunggah." });
     }
-    tempPath = req.file.path;
-    console.log("📂 File diterima:", req.file.originalname, req.file.mimetype, req.file.size);
+    tempPath = req.files['passport-photo'] ? req.files['passport-photo'][0].path : null;
+    console.log("📂 File diterima:", req.files); // Cek file yang diterima
 
     const store = process.env.SHOPIFY_STORE_DOMAIN;
     const token = process.env.SHOPIFY_ADMIN_API_TOKEN;
@@ -93,7 +97,7 @@ app.post("/upload", upload.single("file"), async (req, res) => {
     }
 
     // Tentukan tipe konten
-    const isImage = req.file.mimetype?.startsWith("image/");
+    const isImage = req.files['passport-photo']?.[0]?.mimetype?.startsWith("image/");
     const resourceType = isImage ? "IMAGE" : "FILE";
     const contentType = isImage ? "IMAGE" : "FILE";
     console.log(`🧭 resourceType=${resourceType} contentType=${contentType}`);
@@ -117,8 +121,8 @@ app.post("/upload", upload.single("file"), async (req, res) => {
         variables: {
           input: [
             {
-              filename: req.file.originalname,
-              mimeType: req.file.mimetype,
+              filename: req.files['passport-photo'][0].originalname,
+              mimeType: req.files['passport-photo'][0].mimetype,
               resource: resourceType,
               httpMethod: "POST",
             },
