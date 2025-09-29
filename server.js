@@ -230,5 +230,5 @@ app.post("/upload", upload.single("file"), async (req, res) => {
 
 // ====== Start server (paling akhir) ======
 const PORT = process.env.PORT || 3002;
-const HOST = "127.0.0.1";
+const HOST = "0.0.0.0";
 app.listen(PORT, HOST, () => console.log(`✅ http://${HOST}:${PORT}`));
