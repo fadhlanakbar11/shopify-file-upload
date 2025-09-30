@@ -1,4 +1,3 @@
-// server.js — versi rapi & aman + support rename via webhook
 const express = require("express");
 const multer = require("multer");
 const axios = require("axios");
@@ -6,21 +5,83 @@ const cors = require("cors");
 const fs = require("fs");
 const path = require("path");
 const FormData = require("form-data");
+const crypto = require("crypto");
 require("dotenv").config();
 
 const app = express();
 
-// ====== Konfigurasi umum ======
+fs.mkdirSync(path.join(__dirname, "uploads"), { recursive: true });
+
+const mappingPath = path.join(__dirname, "uploads", "mapping.json");
+if (!fs.existsSync(mappingPath)) {
+  fs.writeFileSync(mappingPath, "{}");
+}
+
+const ax = axios.create({ timeout: 30_000 });
+
+// ====== Webhook orders/create (HARUS raw body, taruh sebelum express.json) ======
+app.post(
+  "/webhook/orders-create",
+  express.raw({ type: "application/json" }),
+  async (req, res) => {
+    try {
+      const hmac = req.get("X-Shopify-Hmac-Sha256");
+      const body = req.body.toString("utf8");
+
+      const hash = crypto
+        .createHmac("sha256", process.env.SHOPIFY_WEBHOOK_SECRET)
+        .update(body, "utf8")
+        .digest("base64");
+
+      if (hash !== hmac) {
+        console.error("❌ HMAC tidak valid");
+        return res.status(401).send("Unauthorized");
+      }
+
+      const order = JSON.parse(body);
+      const orderNumber = order.name?.replace("#", "JT-") || "JT-UNKNOWN";
+      const cartToken = order.cart_token;
+
+      console.log("🧾 Order baru:", orderNumber, "cartToken:", cartToken);
+
+      let mapping = {};
+      if (fs.existsSync(mappingPath)) {
+        mapping = JSON.parse(fs.readFileSync(mappingPath, "utf8"));
+      }
+
+      const files = mapping[cartToken] || [];
+      if (files.length === 0) {
+        console.log("⚠️ Tidak ada file untuk cartToken ini");
+        return res.sendStatus(200);
+      }
+
+      files.forEach((fileName) => {
+        const oldPath = path.join(__dirname, "uploads", fileName);
+        if (!fs.existsSync(oldPath)) return;
+
+        const ext = path.extname(fileName);
+        const base = path.basename(fileName, ext);
+        const newName =
+          base.replace(/^INV_VISA_(.+?)_/, `INV_VISA_$1_${orderNumber}_`) + ext;
+        const newPath = path.join(__dirname, "uploads", newName);
+
+        fs.renameSync(oldPath, newPath);
+        console.log(`✏️ Rename ${fileName} → ${newName}`);
+      });
+
+      res.sendStatus(200);
+    } catch (err) {
+      console.error("❌ Error webhook orders-create:", err.message);
+      res.sendStatus(500);
+    }
+  }
+);
+
+// ====== Konfigurasi umum (taruh setelah webhook) ======
 app.use(cors());
 app.use(express.static("public"));
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
-
-// Pastikan folder uploads/ ada
-fs.mkdirSync(path.join(__dirname, "uploads"), { recursive: true });
-
-// Axios default (timeout biar gak gantung)
-const ax = axios.create({ timeout: 30_000 });
 
 // ====== Multer (simpan file sementara di disk) ======
 const storage = multer.diskStorage({
@@ -34,7 +95,7 @@ const storage = multer.diskStorage({
     const safeField = fieldName.replace(/[^a-z0-9_-]/gi, "-").toLowerCase();
     const newName = `INV_VISA_${safeField}_${index}_${q}${ext}`;
 
-    cb(null, newName); // hasil rename disimpan sebagai req.file.filename
+    cb(null, newName);
   },
 });
 
@@ -92,12 +153,10 @@ app.post("/upload", upload.single("file"), async (req, res) => {
   let tempPath;
   try {
     if (!req.file) {
-      return res
-        .status(400)
-        .json({
-          success: false,
-          error: "Tidak ada file yang diunggah (field name harus 'file').",
-        });
+      return res.status(400).json({
+        success: false,
+        error: "Tidak ada file yang diunggah (field name harus 'file').",
+      });
     }
     tempPath = req.file.path;
     console.log(
@@ -106,6 +165,15 @@ app.post("/upload", upload.single("file"), async (req, res) => {
       req.file.mimetype,
       req.file.size
     );
+
+    const cartToken = req.body.cartToken || "UNKNOWN";
+    let mapping = {};
+    if (fs.existsSync(mappingPath)) {
+      mapping = JSON.parse(fs.readFileSync(mappingPath, "utf8"));
+    }
+    if (!mapping[cartToken]) mapping[cartToken] = [];
+    mapping[cartToken].push(req.file.filename);
+    fs.writeFileSync(mappingPath, JSON.stringify(mapping, null, 2));
 
     const store = process.env.SHOPIFY_STORE_DOMAIN;
     const token = process.env.SHOPIFY_ADMIN_API_TOKEN;
@@ -120,7 +188,6 @@ app.post("/upload", upload.single("file"), async (req, res) => {
     const resourceType = isImage ? "IMAGE" : "FILE";
     const contentType = isImage ? "IMAGE" : "FILE";
 
-    // STEP 1: stagedUploadsCreate
     const stagedRes = await ax.post(
       `https://${store}/admin/api/2025-01/graphql.json`,
       {
@@ -139,7 +206,7 @@ app.post("/upload", upload.single("file"), async (req, res) => {
         variables: {
           input: [
             {
-              filename: req.file.filename, // pakai nama sudah di-rename
+              filename: req.file.filename,
               mimeType: req.file.mimetype,
               resource: resourceType,
               httpMethod: "POST",
@@ -178,7 +245,6 @@ app.post("/upload", upload.single("file"), async (req, res) => {
         });
     }
 
-    // STEP 2: Upload ke storage (S3/GCS)
     const form = new FormData();
     stagedTarget.parameters.forEach((p) => form.append(p.name, p.value));
     form.append("file", fs.createReadStream(tempPath));
@@ -201,7 +267,6 @@ app.post("/upload", upload.single("file"), async (req, res) => {
         });
     }
 
-    // STEP 3: Register file di Shopify
     const fileCreateRes = await ax.post(
       `https://${store}/admin/api/2025-01/graphql.json`,
       {
@@ -299,25 +364,6 @@ app.post("/upload", upload.single("file"), async (req, res) => {
     if (tempPath) {
       fs.promises.unlink(tempPath).catch(() => {});
     }
-  }
-});
-
-// ====== Webhook orders/create ======
-app.post("/webhook/orders-create", async (req, res) => {
-  try {
-    const order = req.body;
-    const orderNumber = order.name?.replace("#", "JT-") || "JT-UNKNOWN";
-    const cartToken = order.cart_token;
-
-    console.log("🧾 Order baru:", orderNumber, "cartToken:", cartToken);
-
-    // TODO: cari file lama (pakai cartToken) lalu re-upload pakai orderNumber
-    // contoh nama final: INV_VISA_field_JT-1234_0_1.jpg
-
-    res.sendStatus(200);
-  } catch (err) {
-    console.error("❌ Error webhook orders-create:", err.message);
-    res.sendStatus(500);
   }
 });
 
