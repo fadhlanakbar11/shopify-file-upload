@@ -21,12 +21,12 @@ const ax = axios.create({ timeout: 30_000 });
 
 /* ================== Webhook orders/create ================== */
 app.post(
-  "/webhook/orders-create",
-  express.raw({ type: "application/json" }),
-  async (req, res) => {
+  "/webhook/orders-create", express.raw({ type: "application/json" }), async (req, res) => {
+    console.log("📥 Webhook received");
     try {
       const hmac = req.get("X-Shopify-Hmac-Sha256");
       const body = req.body.toString("utf8");
+      console.log("Order data:", body);  // tambahkan ini
 
       // verifikasi HMAC
       const hash = crypto

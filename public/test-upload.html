@@ -1,17 +1,25 @@
-<!doctype html>
-<html lang="en">
-  <head>
-    <meta charset="UTF-8" />
-    <title>Test Upload</title>
-  </head>
-  <body>
-    <form
-      action="http://localhost:3000/upload"
-      method="post"
-      enctype="multipart/form-data"
-    >
-      <input type="file" name="file" />
-      <button type="submit">Upload</button>
-    </form>
-  </body>
+<!DOCTYPE html>
+<html>
+<head>
+    <title>File Mapping Check</title>
+</head>
+<body>
+    <h2>File Mapping Status</h2>
+    <button onclick="checkMapping()">Check Mapping</button>
+    <pre id="result"></pre>
+
+    <script>
+        async function checkMapping() {
+            try {
+                const response = await fetch('/check-mapping');
+                const data = await response.json();
+                document.getElementById('result').textContent = 
+                    JSON.stringify(data, null, 2);
+            } catch (err) {
+                document.getElementById('result').textContent = 
+                    'Error: ' + err.message;
+            }
+        }
+    </script>
+</body>
 </html>
