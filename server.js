@@ -20,6 +20,7 @@ if (!fs.existsSync(mappingPath)) {
 const ax = axios.create({ timeout: 30_000 });
 
 // ====== Webhook orders/create (HARUS raw body, taruh sebelum express.json) ======
+// ====== Webhook orders/create ======
 app.post(
   "/webhook/orders-create",
   express.raw({ type: "application/json" }),
@@ -28,6 +29,7 @@ app.post(
       const hmac = req.get("X-Shopify-Hmac-Sha256");
       const body = req.body.toString("utf8");
 
+      // verifikasi HMAC
       const hash = crypto
         .createHmac("sha256", process.env.SHOPIFY_WEBHOOK_SECRET)
         .update(body, "utf8")
@@ -38,12 +40,14 @@ app.post(
         return res.status(401).send("Unauthorized");
       }
 
+      // parse order
       const order = JSON.parse(body);
       const orderNumber = order.name?.replace("#", "JT-") || "JT-UNKNOWN";
       const cartToken = order.cart_token;
 
       console.log("🧾 Order baru:", orderNumber, "cartToken:", cartToken);
 
+      // ambil mapping file lama
       let mapping = {};
       if (fs.existsSync(mappingPath)) {
         mapping = JSON.parse(fs.readFileSync(mappingPath, "utf8"));
@@ -55,19 +59,117 @@ app.post(
         return res.sendStatus(200);
       }
 
-      files.forEach((fileName) => {
-        const oldPath = path.join(__dirname, "uploads", fileName);
-        if (!fs.existsSync(oldPath)) return;
+      const store = process.env.SHOPIFY_STORE_DOMAIN;
+      const token = process.env.SHOPIFY_ADMIN_API_TOKEN;
 
-        const ext = path.extname(fileName);
-        const base = path.basename(fileName, ext);
-        const newName =
-          base.replace(/^INV_VISA_(.+?)_/, `INV_VISA_$1_${orderNumber}_`) + ext;
-        const newPath = path.join(__dirname, "uploads", newName);
+      for (const oldName of files) {
+        const localPath = path.join(__dirname, "uploads", oldName);
+        if (!fs.existsSync(localPath)) continue;
 
-        fs.renameSync(oldPath, newPath);
-        console.log(`✏️ Rename ${fileName} → ${newName}`);
-      });
+        const ext = path.extname(oldName);
+        const base = path.basename(oldName, ext);
+        const parts = base.split("_");
+
+        // nama baru: INV_VISA_field_JT-1234_index_q.ext
+        const safeField = parts[2] || "field";
+        const index = parts[3] || "0";
+        const q = parts[4] || "0";
+        const newName = `INV_VISA_${safeField}_${orderNumber}_${index}_${q}${ext}`;
+
+        console.log(`⬆️ Re-upload ${oldName} → ${newName}`);
+
+        // === Upload ulang ke Shopify ===
+        const stagedRes = await ax.post(
+          `https://${store}/admin/api/2025-01/graphql.json`,
+          {
+            query: `
+              mutation stagedUploadsCreate($input: [StagedUploadInput!]!) {
+                stagedUploadsCreate(input: $input) {
+                  stagedTargets {
+                    url
+                    resourceUrl
+                    parameters { name value }
+                  }
+                  userErrors { field message }
+                }
+              }
+            `,
+            variables: {
+              input: [
+                {
+                  filename: newName,
+                  mimeType: "image/jpeg", // ganti sesuai kebutuhan
+                  resource: "IMAGE",
+                  httpMethod: "POST",
+                },
+              ],
+            },
+          },
+          {
+            headers: {
+              "X-Shopify-Access-Token": token,
+              "Content-Type": "application/json",
+            },
+          }
+        );
+
+        const stagedTarget =
+          stagedRes.data?.data?.stagedUploadsCreate?.stagedTargets?.[0];
+        if (!stagedTarget) {
+          console.error("❌ stagedUploadsCreate gagal:", stagedRes.data);
+          continue;
+        }
+
+        const form = new FormData();
+        stagedTarget.parameters.forEach((p) => form.append(p.name, p.value));
+        form.append("file", fs.createReadStream(localPath));
+
+        const s3Res = await ax.post(stagedTarget.url, form, {
+          headers: form.getHeaders(),
+          maxContentLength: Infinity,
+          maxBodyLength: Infinity,
+          validateStatus: () => true,
+        });
+        console.log("✅ Upload ke storage:", s3Res.status);
+
+        // daftar file ke Shopify
+        const fileCreateRes = await ax.post(
+          `https://${store}/admin/api/2025-01/graphql.json`,
+          {
+            query: `
+              mutation fileCreate($files: [FileCreateInput!]!) {
+                fileCreate(files: $files) {
+                  files { id alt ... on GenericFile { url } ... on MediaImage { image { url } } }
+                  userErrors { field message }
+                }
+              }
+            `,
+            variables: {
+              files: [
+                {
+                  alt: newName,
+                  contentType: "IMAGE",
+                  originalSource: stagedTarget.resourceUrl,
+                },
+              ],
+            },
+          },
+          {
+            headers: {
+              "X-Shopify-Access-Token": token,
+              "Content-Type": "application/json",
+            },
+          }
+        );
+
+        const uploadedFile =
+          fileCreateRes.data?.data?.fileCreate?.files?.[0] || null;
+        if (uploadedFile) {
+          console.log("🎉 Re-upload berhasil:", uploadedFile.id);
+        } else {
+          console.error("❌ fileCreate gagal:", fileCreateRes.data);
+        }
+      }
 
       res.sendStatus(200);
     } catch (err) {
@@ -225,24 +327,20 @@ app.post("/upload", upload.single("file"), async (req, res) => {
     const errors1 = stagedRes.data?.data?.stagedUploadsCreate?.userErrors || [];
     if (errors1.length) {
       console.error("❌ stagedUploadsCreate errors:", errors1);
-      return res
-        .status(502)
-        .json({
-          success: false,
-          error: "stagedUploadsCreate gagal",
-          details: errors1,
-        });
+      return res.status(502).json({
+        success: false,
+        error: "stagedUploadsCreate gagal",
+        details: errors1,
+      });
     }
 
     const stagedTarget =
       stagedRes.data?.data?.stagedUploadsCreate?.stagedTargets?.[0];
     if (!stagedTarget) {
-      return res
-        .status(502)
-        .json({
-          success: false,
-          error: "Gagal membuat staged upload (stagedTarget kosong).",
-        });
+      return res.status(502).json({
+        success: false,
+        error: "Gagal membuat staged upload (stagedTarget kosong).",
+      });
     }
 
     const form = new FormData();
@@ -258,13 +356,11 @@ app.post("/upload", upload.single("file"), async (req, res) => {
     console.log("✅ Upload ke storage:", s3Res.status);
 
     if (s3Res.status < 200 || s3Res.status >= 300) {
-      return res
-        .status(502)
-        .json({
-          success: false,
-          error: "Upload ke storage gagal",
-          status: s3Res.status,
-        });
+      return res.status(502).json({
+        success: false,
+        error: "Upload ke storage gagal",
+        status: s3Res.status,
+      });
     }
 
     const fileCreateRes = await ax.post(
@@ -313,13 +409,11 @@ app.post("/upload", upload.single("file"), async (req, res) => {
     const uploadedFile =
       fileCreateRes.data?.data?.fileCreate?.files?.[0] || null;
     if (!uploadedFile) {
-      return res
-        .status(502)
-        .json({
-          success: false,
-          error: "Tidak ada file object dari Shopify",
-          raw: fileCreateRes.data,
-        });
+      return res.status(502).json({
+        success: false,
+        error: "Tidak ada file object dari Shopify",
+        raw: fileCreateRes.data,
+      });
     }
 
     let fileUrl =
@@ -344,13 +438,11 @@ app.post("/upload", upload.single("file"), async (req, res) => {
     }
 
     if (!fileUrl) {
-      return res
-        .status(502)
-        .json({
-          success: false,
-          error: "Response tidak berisi URL file",
-          uploadedFile,
-        });
+      return res.status(502).json({
+        success: false,
+        error: "Response tidak berisi URL file",
+        uploadedFile,
+      });
     }
 
     console.log("✅ Uploaded ke Shopify:", fileUrl);
