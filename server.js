@@ -1,5 +1,3 @@
-ini kode dari servernya
-
 // server.js — versi rapi & aman
 const express = require("express");
 const multer = require("multer");
