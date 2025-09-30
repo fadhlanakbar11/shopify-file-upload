@@ -89,12 +89,10 @@ app.post("/upload", upload.single("file"), async (req, res) => {
   let tempPath; // untuk cleanup
   try {
     if (!req.file) {
-      return res
-        .status(400)
-        .json({
-          success: false,
-          error: "Tidak ada file yang diunggah (field name harus 'file').",
-        });
+      return res.status(400).json({
+        success: false,
+        error: "Tidak ada file yang diunggah (field name harus 'file').",
+      });
     }
     tempPath = req.file.path;
     console.log(
@@ -157,24 +155,20 @@ app.post("/upload", upload.single("file"), async (req, res) => {
     const errors1 = stagedRes.data?.data?.stagedUploadsCreate?.userErrors || [];
     if (errors1.length) {
       console.error("❌ stagedUploadsCreate errors:", errors1);
-      return res
-        .status(502)
-        .json({
-          success: false,
-          error: "stagedUploadsCreate gagal",
-          details: errors1,
-        });
+      return res.status(502).json({
+        success: false,
+        error: "stagedUploadsCreate gagal",
+        details: errors1,
+      });
     }
 
     const stagedTarget =
       stagedRes.data?.data?.stagedUploadsCreate?.stagedTargets?.[0];
     if (!stagedTarget) {
-      return res
-        .status(502)
-        .json({
-          success: false,
-          error: "Gagal membuat staged upload (stagedTarget kosong).",
-        });
+      return res.status(502).json({
+        success: false,
+        error: "Gagal membuat staged upload (stagedTarget kosong).",
+      });
     }
 
     // STEP 2: Upload ke storage (S3/GCS) via signed URL
@@ -191,16 +185,27 @@ app.post("/upload", upload.single("file"), async (req, res) => {
     console.log("✅ Upload ke storage:", s3Res.status);
 
     if (s3Res.status < 200 || s3Res.status >= 300) {
-      return res
-        .status(502)
-        .json({
-          success: false,
-          error: "Upload ke storage gagal",
-          status: s3Res.status,
-        });
+      return res.status(502).json({
+        success: false,
+        error: "Upload ke storage gagal",
+        status: s3Res.status,
+      });
     }
 
     // STEP 3: Register file di Shopify
+    // Tentukan alt text berdasarkan nama file
+    let altText = "Upload file dari checkout";
+    const lowerName = req.file.originalname.toLowerCase();
+    if (lowerName.includes("visa-waiver")) {
+      altText = "Upload file Visa Waiver";
+    } else if (lowerName.includes("e-passport")) {
+      altText = "Upload foto e-Passport";
+    } else if (lowerName.includes("endorsement")) {
+      altText = "Upload foto halaman endorsement paspor";
+    } else if (lowerName.includes("cover")) {
+      altText = "Upload foto sampul paspor";
+    }
+
     const fileCreateRes = await ax.post(
       `https://${store}/admin/api/2025-01/graphql.json`,
       {
@@ -221,7 +226,7 @@ app.post("/upload", upload.single("file"), async (req, res) => {
         variables: {
           files: [
             {
-              alt: req.file.originalname,
+              alt: altText, // ⬅️ sekarang deskriptif
               contentType,
               originalSource: stagedTarget.resourceUrl,
             },
@@ -247,13 +252,11 @@ app.post("/upload", upload.single("file"), async (req, res) => {
     const uploadedFile =
       fileCreateRes.data?.data?.fileCreate?.files?.[0] || null;
     if (!uploadedFile) {
-      return res
-        .status(502)
-        .json({
-          success: false,
-          error: "Tidak ada file object dari Shopify",
-          raw: fileCreateRes.data,
-        });
+      return res.status(502).json({
+        success: false,
+        error: "Tidak ada file object dari Shopify",
+        raw: fileCreateRes.data,
+      });
     }
 
     // Ambil URL
@@ -280,13 +283,11 @@ app.post("/upload", upload.single("file"), async (req, res) => {
     }
 
     if (!fileUrl) {
-      return res
-        .status(502)
-        .json({
-          success: false,
-          error: "Response tidak berisi URL file",
-          uploadedFile,
-        });
+      return res.status(502).json({
+        success: false,
+        error: "Response tidak berisi URL file",
+        uploadedFile,
+      });
     }
 
     console.log("✅ Uploaded ke Shopify:", fileUrl);
