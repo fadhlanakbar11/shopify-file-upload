@@ -197,13 +197,13 @@ app.post("/upload", upload.single("file"), async (req, res) => {
     let altText = "Upload file dari checkout";
     const lowerName = req.file.originalname.toLowerCase();
     if (lowerName.includes("visa-waiver")) {
-      altText = "Upload file Visa Waiver";
+      altText = "File Visa Waiver";
     } else if (lowerName.includes("e-passport")) {
-      altText = "Upload foto e-Passport";
+      altText = "File Visa Waiver";
     } else if (lowerName.includes("endorsement")) {
-      altText = "Upload foto halaman endorsement paspor";
+      altText = "File Visa Waiver";
     } else if (lowerName.includes("cover")) {
-      altText = "Upload foto sampul paspor";
+      altText = "File Visa Waiver";
     }
 
     const fileCreateRes = await ax.post(
