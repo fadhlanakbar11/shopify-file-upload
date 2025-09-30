@@ -21,12 +21,12 @@ const ax = axios.create({ timeout: 30_000 });
 
 /* ================== Webhook orders/create ================== */
 app.post(
-  "/webhook/orders-create", express.raw({ type: "application/json" }), async (req, res) => {
-    console.log("📥 Webhook received");
+  "/webhook/orders-create",
+  express.raw({ type: "application/json" }),
+  async (req, res) => {
     try {
       const hmac = req.get("X-Shopify-Hmac-Sha256");
       const body = req.body.toString("utf8");
-      console.log("Order data:", body);  // tambahkan ini
 
       // verifikasi HMAC
       const hash = crypto
@@ -261,7 +261,12 @@ app.post("/upload", upload.single("file"), async (req, res) => {
         error: "Tidak ada file yang diunggah (field name harus 'file').",
       });
     }
-    console.log("📂 File diterima:", req.file.filename, req.file.mimetype, req.file.size);
+    console.log(
+      "📂 File diterima:",
+      req.file.filename,
+      req.file.mimetype,
+      req.file.size
+    );
 
     const cartToken = req.body.cartToken || "UNKNOWN";
     let mapping = {};
@@ -403,11 +408,15 @@ app.post("/upload", upload.single("file"), async (req, res) => {
     return res.json({ success: true, url: fileUrl });
   } catch (err) {
     console.error("❌ Error upload:", err.response?.data || err.message);
-    return res.status(500).json({ success: false, error: "Gagal upload ke Shopify" });
+    return res
+      .status(500)
+      .json({ success: false, error: "Gagal upload ke Shopify" });
   }
 });
 
 /* ================== Start server ================== */
 const PORT = process.env.PORT || 3002;
 const HOST = "0.0.0.0";
-app.listen(PORT, HOST, () => console.log(`✅ Server running at http://${HOST}:${PORT}`));
+app.listen(PORT, HOST, () =>
+  console.log(`✅ Server running at http://${HOST}:${PORT}`)
+);
