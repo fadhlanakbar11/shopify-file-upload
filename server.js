@@ -1,4 +1,4 @@
-// server.js — versi rapi & aman + rename support
+// server.js — versi rapi & aman
 const express = require("express");
 const multer = require("multer");
 const axios = require("axios");
@@ -13,8 +13,6 @@ const app = express();
 // ====== Konfigurasi umum ======
 app.use(cors()); // longgar; boleh dibatasi origin kalau perlu
 app.use(express.static("public"));
-app.use(express.json());
-app.use(express.urlencoded({ extended: true }));
 
 // Pastikan folder uploads/ ada
 fs.mkdirSync(path.join(__dirname, "uploads"), { recursive: true });
@@ -25,19 +23,10 @@ const ax = axios.create({ timeout: 30_000 });
 // ====== Multer (simpan file sementara di disk) ======
 const storage = multer.diskStorage({
   destination: (_req, _file, cb) => cb(null, "uploads/"),
-  filename: (req, file, cb) => {
-    // metadata dari client
-    const fieldName = req.body.fieldName || "field";
-    const cartToken = req.body.cartToken || "notoken";
-    const index = req.body.index || "0";
-    const q = req.body.q || "0";
-    const ext = path.extname(file.originalname);
-
-    // gunakan template rename sementara
-    const safeField = fieldName.replace(/[^a-z0-9_-]/gi, "-").toLowerCase();
-    const newName = `INV_VISA_${safeField}_${cartToken}_${index}_${q}${ext}`;
-
-    cb(null, newName);
+  filename: (_req, file, cb) => {
+    // prefiks timestamp agar tidak menimpa file lama, tetap pertahankan nama asli
+    const safeName = file.originalname.replace(/[/\\?%*:|"<>]/g, "_");
+    cb(null, `${Date.now()}_${safeName}`);
   },
 });
 const upload = multer({
@@ -92,7 +81,7 @@ app.post("/upload", upload.single("file"), async (req, res) => {
       return res.status(400).json({ success: false, error: "Tidak ada file yang diunggah (field name harus 'file')." });
     }
     tempPath = req.file.path;
-    console.log("📂 File diterima:", req.file.filename, req.file.mimetype, req.file.size);
+    console.log("📂 File diterima:", req.file.originalname, req.file.mimetype, req.file.size);
 
     const store = process.env.SHOPIFY_STORE_DOMAIN;
     const token = process.env.SHOPIFY_ADMIN_API_TOKEN;
@@ -128,7 +117,7 @@ app.post("/upload", upload.single("file"), async (req, res) => {
         variables: {
           input: [
             {
-              filename: req.file.filename, // <-- pakai nama baru hasil rename
+              filename: req.file.originalname,
               mimeType: req.file.mimetype,
               resource: resourceType,
               httpMethod: "POST",
@@ -188,7 +177,7 @@ app.post("/upload", upload.single("file"), async (req, res) => {
         variables: {
           files: [
             {
-              alt: req.file.filename, // simpan nama baru di alt
+              alt: "Uploaded via Node.js",
               contentType,
               originalSource: stagedTarget.resourceUrl,
             },
